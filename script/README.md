@@ -1,87 +1,87 @@
-# テストスクリプト
+# Test Scripts
 
-このディレクトリには、ngx_ratelimit_redisモジュールをテストするためのスクリプトが含まれています。
+This directory contains scripts for testing the ngx_ratelimit_redis module.
 
-## スクリプト一覧
+## Available Scripts
 
 ### test_rate_limit.sh
 
-基本的なレート制限機能をテストするためのスクリプトです。curlを使用して指定された回数のリクエストを送信し、レート制限の動作を確認します。
+A script for testing basic rate limiting functionality. Uses curl to send a specified number of requests and verifies rate limiting behavior.
 
 ```bash
-./script/test_rate_limit.sh [オプション]
+./script/test_rate_limit.sh [options]
 ```
 
-#### オプション:
-- `-h, --host` - ホスト名またはIPアドレス (デフォルト: localhost)
-- `-p, --port` - ポート番号 (デフォルト: 8080)
-- `-n, --requests` - 送信するリクエスト数 (デフォルト: 15)
-- `-w, --wait` - リクエスト間の待機時間（秒） (デフォルト: 0.1)
-- `-k, --key` - APIキー (デフォルト: test-api-key)
+#### Options:
+- `-h, --host` - Hostname or IP address (default: localhost)
+- `-p, --port` - Port number (default: 8080)
+- `-n, --requests` - Number of requests to send (default: 15)
+- `-w, --wait` - Wait time between requests in seconds (default: 0.1)
+- `-k, --key` - API key (default: test-api-key)
 
-#### 使用例:
+#### Examples:
 ```bash
-# デフォルト設定でテスト実行
+# Run test with default settings
 ./script/test_rate_limit.sh
 
-# カスタム設定でテスト実行
+# Run test with custom settings
 ./script/test_rate_limit.sh -h 192.168.1.10 -p 80 -n 30 -w 0.5 -k my-api-key
 ```
 
 ### benchmark_rate_limit.sh
 
-Apache Bench (ab) や hey などのツールを使用して、レート制限機能の性能をベンチマークするスクリプトです。
+A script for benchmarking rate limiting functionality using tools like Apache Bench (ab) and hey.
 
 ```bash
-./script/benchmark_rate_limit.sh [オプション]
+./script/benchmark_rate_limit.sh [options]
 ```
 
-#### オプション:
-- `-h, --host` - ホスト名またはIPアドレス (デフォルト: localhost)
-- `-p, --port` - ポート番号 (デフォルト: 8080)
-- `-c, --concurrency` - 同時接続数 (デフォルト: 10)
-- `-n, --requests` - 総リクエスト数 (デフォルト: 100)
-- `-k, --key` - APIキー (デフォルト: test-api-key)
-- `-e, --endpoint` - テスト対象のエンドポイント (デフォルト: /)
-- `--api` - APIキーヘッダーを使用する
+#### Options:
+- `-h, --host` - Hostname or IP address (default: localhost)
+- `-p, --port` - Port number (default: 8080)
+- `-c, --concurrency` - Number of concurrent connections (default: 10)
+- `-n, --requests` - Total number of requests (default: 100)
+- `-k, --key` - API key (default: test-api-key)
+- `-e, --endpoint` - Target endpoint (default: /)
+- `--api` - Use API key header
 
-#### 使用例:
+#### Examples:
 ```bash
-# デフォルト設定でベンチマーク実行
+# Run benchmark with default settings
 ./script/benchmark_rate_limit.sh
 
-# APIキーを使用したベンチマーク
+# Run benchmark with API key
 ./script/benchmark_rate_limit.sh --api -e /api -n 500 -c 20
 ```
 
 ### docker_test.sh
 
-Dockerを使用してモジュールをビルド・実行し、テストするためのスクリプトです。DockerイメージをビルドしてコンテナでNGINXを起動し、test_rate_limit.shを使用してテストを実行します。
+A script for building and testing the module using Docker. It builds a Docker image, starts NGINX in a container, and runs the test_rate_limit.sh script.
 
 ```bash
-./script/docker_test.sh [オプション]
+./script/docker_test.sh [options]
 ```
 
-#### オプション:
-- `--keep` - テスト後もコンテナを実行したままにする
+#### Options:
+- `--keep` - Keep the container running after tests
 
-#### 使用例:
+#### Examples:
 ```bash
-# Dockerを使用したテスト実行（テスト後にコンテナを停止）
+# Run Docker test (container will be stopped after tests)
 ./script/docker_test.sh
 
-# テスト後もコンテナを実行したままにする
+# Keep container running after tests
 ./script/docker_test.sh --keep
 ```
 
-## 前提条件
+## Prerequisites
 
-- テストスクリプト: curlがインストールされていること
-- ベンチマークスクリプト: Apache Bench (ab) がインストールされていること
-- Dockerテストスクリプト: Dockerがインストールされていること
+- Test scripts: curl must be installed
+- Benchmark script: Apache Bench (ab) must be installed
+- Docker test script: Docker must be installed
 
-## 注意事項
+## Notes
 
-- レート制限のテストでは、多数のリクエストが403 Forbiddenで失敗するのは正常な動作です。
-- ベンチマークの結果は実際のトラフィックパターンとは異なるため、参考値として扱ってください。
-- Dockerテスト時は、ポート8080がすでに使用されていないことを確認してください。
+- During rate limit testing, it's normal for many requests to fail with 403 Forbidden status.
+- Benchmark results should be treated as reference values since they don't represent real traffic patterns.
+- When running Docker tests, make sure port 8080 is not already in use.

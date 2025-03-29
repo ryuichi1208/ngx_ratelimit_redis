@@ -1,60 +1,60 @@
 # ngx_ratelimit_redis
 
-NGINXでRedisをバックエンドとして使用するレートリミットモジュール。[ngx-rust](https://github.com/nginx/ngx-rust)を使用してRustで実装されています。
+A rate limiting module for NGINX using Redis as a backend. Implemented in Rust using [ngx-rust](https://github.com/nginx/ngx-rust).
 
-## 機能
+## Features
 
-- Redisをバックエンドとした分散レートリミット
-- IPアドレスやカスタムヘッダー（APIキーなど）に基づいたレート制限
-- 毎秒のリクエスト数とバースト値の設定
-- スライディングウィンドウアルゴリズムによる正確なレート制限
+- Distributed rate limiting with Redis backend
+- Rate limiting based on IP address or custom headers (like API keys)
+- Configurable requests per second and burst values
+- Accurate rate limiting using sliding window algorithm
 
-## ビルド方法
+## Building
 
-### 依存関係
+### Dependencies
 
-- Rust（1.65以上）
-- NGINX（1.22.0以上推奨）
+- Rust (1.65 or later)
+- NGINX (1.22.0 or later recommended)
 - Cargo
-- Redis（4.0以上）
+- Redis (4.0 or later)
 
-### コンパイル
+### Compilation
 
 ```bash
-# 環境変数でNGINXのバージョンを指定可能
+# Specify NGINX version via environment variable
 NGX_VERSION=1.26.3 cargo build --release
 ```
 
-ビルドが完了すると、`target/release/libngx_ratelimit_redis.so`（Linux）または`target/release/libngx_ratelimit_redis.dylib`（MacOS）が生成されます。
+After the build completes, you'll find `target/release/libngx_ratelimit_redis.so` (Linux) or `target/release/libngx_ratelimit_redis.dylib` (MacOS).
 
-### Dockerを使用したビルド
+### Building with Docker
 
 ```bash
-# Dockerイメージをビルド
+# Build Docker image
 docker build -t ngx-ratelimit-redis .
 
-# コンテナを起動
+# Run container
 docker run -d -p 8080:8080 ngx-ratelimit-redis
 ```
 
-## インストール
+## Installation
 
-生成されたモジュールファイルをNGINXのモジュールディレクトリにコピーします：
+Copy the generated module file to your NGINX modules directory:
 
 ```bash
-# Linuxの場合
+# For Linux
 sudo cp target/release/libngx_ratelimit_redis.so /usr/lib/nginx/modules/
 
-# MacOSの場合
+# For MacOS
 sudo cp target/release/libngx_ratelimit_redis.dylib /usr/local/opt/nginx/modules/
 ```
 
-## 設定
+## Configuration
 
-NGINXの設定ファイルでモジュールをロードし、設定を行います：
+Load the module in your NGINX configuration file and configure it:
 
 ```nginx
-# モジュールをロード
+# Load the module
 load_module modules/libngx_ratelimit_redis.so;
 
 http {
@@ -62,102 +62,102 @@ http {
         # ...
 
         location / {
-            # モジュールを有効化
+            # Enable the module with options
             ratelimit_redis on redis_url=redis://127.0.0.1:6379 key=remote_addr rate=10 burst=5;
 
-            # 他の設定...
+            # Other directives...
         }
     }
 }
 ```
 
-### 設定オプション
+### Configuration Options
 
-| オプション  | 説明                                   | デフォルト値              |
-|-----------|----------------------------------------|-------------------------|
-| on/off    | モジュールの有効/無効                    | off                     |
-| redis_url | Redisサーバーの接続URL                  | redis://127.0.0.1:6379  |
-| key       | レート制限に使用するキー                  | remote_addr             |
-| rate      | 1秒あたりの最大リクエスト数               | 10                      |
-| burst     | 一時的に許容される超過リクエスト数         | 5                       |
+| Option    | Description                                | Default Value           |
+|-----------|--------------------------------------------|-------------------------|
+| on/off    | Enable/disable the module                  | off                     |
+| redis_url | Redis server connection URL                | redis://127.0.0.1:6379  |
+| key       | Key used for rate limiting                 | remote_addr             |
+| rate      | Maximum requests per second                | 10                      |
+| burst     | Temporarily allowed excess requests        | 5                       |
 
-### キーの種類
+### Key Types
 
-- `remote_addr`: クライアントのIPアドレス
-- `http_[ヘッダー名]`: 指定したHTTPヘッダーの値（例: `http_x_api_key`）
+- `remote_addr`: Client IP address
+- `http_[header_name]`: Value of specified HTTP header (e.g., `http_x_api_key`)
 
-## 使用例
+## Usage Examples
 
 ```nginx
-# IPアドレスベースのレート制限
+# IP-based rate limiting
 location / {
     ratelimit_redis on redis_url=redis://127.0.0.1:6379 key=remote_addr rate=10 burst=5;
     # ...
 }
 
-# APIキーベースのレート制限
+# API key-based rate limiting
 location /api {
     ratelimit_redis on redis_url=redis://redis-server:6379 key=http_x_api_key rate=5 burst=2;
     # ...
 }
 
-# レート制限を無効化
+# Disable rate limiting
 location /static {
     ratelimit_redis off;
     # ...
 }
 ```
 
-## テスト
+## Testing
 
-このモジュールの動作を検証するためのテストスクリプトが `script` ディレクトリに用意されています。
+Test scripts are available in the `script` directory to verify the functionality of this module.
 
-### 基本的なテスト
+### Basic Testing
 
 ```bash
-# 基本的なレート制限のテスト
+# Basic rate limit testing
 ./script/test_rate_limit.sh
 
-# カスタム設定でテスト
+# Testing with custom settings
 ./script/test_rate_limit.sh -n 30 -w 0.2
 ```
 
-### Dockerを使用したテスト
+### Testing with Docker
 
 ```bash
-# Dockerでのテスト（イメージのビルド、コンテナ起動、テスト実行を自動化）
+# Docker testing (builds image, starts container, runs tests)
 ./script/docker_test.sh
 
-# テスト後もコンテナを起動したままにする場合
+# Keep container running after tests
 ./script/docker_test.sh --keep
 ```
 
-### ベンチマーク
+### Benchmarking
 
 ```bash
-# レート制限機能のベンチマーク
+# Benchmark rate limiting functionality
 ./script/benchmark_rate_limit.sh
 
-# APIキーを使用したベンチマーク
+# Benchmark with API key
 ./script/benchmark_rate_limit.sh --api -e /api
 ```
 
-詳細なテスト方法については、[script/README.md](script/README.md) を参照してください。
+For detailed testing instructions, see [script/README.md](script/README.md).
 
-## 動作の仕組み
+## How It Works
 
-このモジュールは、Redisをバックエンドとして使用し、スライディングウィンドウアルゴリズムでレート制限を実装しています。これにより、分散環境でも正確なレート制限が可能になります。
+This module implements rate limiting using Redis as a backend with a sliding window algorithm. This enables accurate rate limiting even in distributed environments.
 
-1. リクエストが来るとキー（IPアドレスやAPIキーなど）を抽出
-2. Redisでそのキーのカウンターを増加
-3. 設定された制限を超えた場合、403 Forbiddenを返す
-4. 制限内の場合、リクエスト処理を続行
+1. Extract the key (IP address, API key, etc.) when a request arrives
+2. Increment the counter for that key in Redis
+3. Return 403 Forbidden if the configured limit is exceeded
+4. Continue request processing if within limits
 
-## ライセンス
+## License
 
 Apache License 2.0
 
-## 参考
+## References
 
 - [NGINX](https://nginx.org/)
 - [ngx-rust](https://github.com/nginx/ngx-rust)
