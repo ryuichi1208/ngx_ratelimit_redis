@@ -27,6 +27,16 @@ NGX_VERSION=1.26.3 cargo build --release
 
 ビルドが完了すると、`target/release/libngx_ratelimit_redis.so`（Linux）または`target/release/libngx_ratelimit_redis.dylib`（MacOS）が生成されます。
 
+### Dockerを使用したビルド
+
+```bash
+# Dockerイメージをビルド
+docker build -t ngx-ratelimit-redis .
+
+# コンテナを起動
+docker run -d -p 8080:8080 ngx-ratelimit-redis
+```
+
 ## インストール
 
 生成されたモジュールファイルをNGINXのモジュールディレクトリにコピーします：
@@ -97,6 +107,42 @@ location /static {
     # ...
 }
 ```
+
+## テスト
+
+このモジュールの動作を検証するためのテストスクリプトが `script` ディレクトリに用意されています。
+
+### 基本的なテスト
+
+```bash
+# 基本的なレート制限のテスト
+./script/test_rate_limit.sh
+
+# カスタム設定でテスト
+./script/test_rate_limit.sh -n 30 -w 0.2
+```
+
+### Dockerを使用したテスト
+
+```bash
+# Dockerでのテスト（イメージのビルド、コンテナ起動、テスト実行を自動化）
+./script/docker_test.sh
+
+# テスト後もコンテナを起動したままにする場合
+./script/docker_test.sh --keep
+```
+
+### ベンチマーク
+
+```bash
+# レート制限機能のベンチマーク
+./script/benchmark_rate_limit.sh
+
+# APIキーを使用したベンチマーク
+./script/benchmark_rate_limit.sh --api -e /api
+```
+
+詳細なテスト方法については、[script/README.md](script/README.md) を参照してください。
 
 ## 動作の仕組み
 
