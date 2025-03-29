@@ -1,5 +1,8 @@
 # ngx_ratelimit_redis
 
+[![CI](https://github.com/ryuichi1208/ngx_ratelimit_redis/actions/workflows/ci.yml/badge.svg)](https://github.com/ryuichi1208/ngx_ratelimit_redis/actions/workflows/ci.yml)
+[![Docker Build](https://github.com/ryuichi1208/ngx_ratelimit_redis/actions/workflows/docker.yml/badge.svg)](https://github.com/ryuichi1208/ngx_ratelimit_redis/actions/workflows/docker.yml)
+
 A rate limiting module for NGINX using Redis as a backend. Implemented in Rust using [ngx-rust](https://github.com/nginx/ngx-rust).
 
 ## Features

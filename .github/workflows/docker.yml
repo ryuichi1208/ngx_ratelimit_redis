@@ -1,0 +1,107 @@
+name: Docker Build
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+    inputs:
+      nginx_version:
+        description: 'NGINX version to build against'
+        required: true
+        default: '1.26.3'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    name: Build and push Docker image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v4
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=ref,event=branch
+            type=sha,format=short
+
+      - name: Determine NGINX version
+        id: nginx_version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "NGX_VERSION=${{ github.event.inputs.nginx_version }}" >> $GITHUB_ENV
+          else
+            echo "NGX_VERSION=1.26.3" >> $GITHUB_ENV
+          fi
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            NGX_VERSION=${{ env.NGX_VERSION }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  test-image:
+    name: Test Docker image
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.event_name != 'pull_request'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set image name
+        id: image
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            TAG=${GITHUB_REF#refs/tags/}
+          else
+            TAG=sha-$(echo ${{ github.sha }} | cut -c1-7)
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$TAG" >> $GITHUB_ENV
+
+      - name: Pull image
+        run: docker pull ${{ env.IMAGE }}
+
+      - name: Run container
+        run: |
+          docker run -d --name ngx-redis-test -p 8080:8080 ${{ env.IMAGE }}
+          sleep 5  # Wait for container to start
+
+      - name: Test functionality
+        run: |
+          chmod +x ./script/test_rate_limit.sh
+          ./script/test_rate_limit.sh -n 10 -w 0.2 || true
+
+      - name: Output logs on failure
+        if: failure()
+        run: docker logs ngx-redis-test
