@@ -1,0 +1,47 @@
+worker_processes  1;
+error_log  logs/error.log  debug;
+events {
+    worker_connections  1024;
+}
+
+# Redisレートリミットモジュールをロード
+load_module modules/libngx_ratelimit_redis.so;
+
+http {
+    server {
+        listen 8080;
+        server_name localhost;
+
+        # すべてのIPアドレスに対して、毎秒10リクエストまで許可（バースト5）
+        location / {
+            # モジュールを有効化し、オプションを設定
+            ratelimit_redis on redis_url=redis://127.0.0.1:6379 key=remote_addr rate=10 burst=5;
+
+            # レート制限に引っかかった場合、403 Forbiddenを返し、
+            # それ以外の場合は次のハンドラに処理を渡す
+
+            # 他のディレクティブ...
+            root html;
+            index index.html index.htm;
+        }
+
+        # APIキーを使用したレート制限の例
+        location /api {
+            # APIキーを使用したレート制限（X-API-Keyヘッダー）
+            # 毎秒5リクエストまで許可（バースト2）
+            ratelimit_redis on redis_url=redis://127.0.0.1:6379 key=http_x_api_key rate=5 burst=2;
+
+            # ハンドラ処理...
+            return 200 "API Response";
+        }
+
+        # 特定のパスに対してレート制限しない例
+        location /static {
+            # レート制限を無効化
+            ratelimit_redis off;
+
+            # 静的ファイルの処理...
+            alias /path/to/static;
+        }
+    }
+}
