@@ -1,5 +1,4 @@
-
-se lazy_static::lazy_static;
+use lazy_static::lazy_static;
 use log::{debug, error, info};
 use nginx::core::*;
 use nginx::http::*;
@@ -8,7 +7,7 @@ use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 
 mod redis_client;
-use redis_client::{RedisRateLimiter, RateLimitConfig};
+use redis_client::{RateLimitAlgorithm, RateLimitConfig, RedisRateLimiter};
 
 // モジュールの設定構造体
 #[derive(Debug, Clone)]
@@ -18,6 +17,8 @@ struct RateLimitRedisConfig {
     requests_per_second: u32,
     burst: u32,
     enabled: bool,
+    algorithm: RateLimitAlgorithm,
+    window_size: u32,
 }
 
 impl Default for RateLimitRedisConfig {
@@ -28,6 +29,8 @@ impl Default for RateLimitRedisConfig {
             requests_per_second: 10,
             burst: 5,
             enabled: false,
+            algorithm: RateLimitAlgorithm::SlidingWindow,
+            window_size: 60,
         }
     }
 }
@@ -72,10 +75,7 @@ async fn http_init(cmcf: &mut HttpMainConf) -> Result<(), String> {
 
 // "ratelimit_redis" ディレクティブの設定ハンドラ
 #[nginx_handler]
-async fn ratelimit_redis_command(
-    cf: &mut HttpConfRef,
-    cmd: &CommandArgs,
-) -> Result<(), String> {
+async fn ratelimit_redis_command(cf: &mut HttpConfRef, cmd: &CommandArgs) -> Result<(), String> {
     let ctx = cf.get_module_ctx::<ModuleContext>().unwrap_or_else(|| {
         let ctx = ModuleContext {
             config: RateLimitRedisConfig::default(),
@@ -123,6 +123,19 @@ async fn ratelimit_redis_command(
             } else {
                 return Err(format!("Invalid burst value: {}", burst_str));
             }
+        } else if arg.starts_with("algorithm=") {
+            let algorithm_str = arg.trim_start_matches("algorithm=");
+            match RateLimitAlgorithm::from_str(algorithm_str) {
+                Ok(algorithm) => config.algorithm = algorithm,
+                Err(err) => return Err(err),
+            }
+        } else if arg.starts_with("window_size=") {
+            let window_str = arg.trim_start_matches("window_size=");
+            if let Ok(window) = window_str.parse::<u32>() {
+                config.window_size = window;
+            } else {
+                return Err(format!("Invalid window_size value: {}", window_str));
+            }
         } else {
             return Err(format!("Unknown parameter: {}", arg));
         }
@@ -138,6 +151,8 @@ async fn ratelimit_redis_command(
             redis_url: config.redis_url.clone(),
             requests_per_second: config.requests_per_second,
             burst: config.burst,
+            algorithm: config.algorithm,
+            window_size: config.window_size,
         };
 
         match RUNTIME.block_on(async {
@@ -145,7 +160,10 @@ async fn ratelimit_redis_command(
             *limiter = Some(RedisRateLimiter::new(limiter_config).await?);
             Ok::<(), String>(())
         }) {
-            Ok(_) => info!("Redis Rate Limiter initialized"),
+            Ok(_) => info!(
+                "Redis Rate Limiter initialized with algorithm: {}",
+                config.algorithm
+            ),
             Err(e) => error!("Failed to initialize Redis connection: {}", e),
         }
     }
@@ -177,7 +195,7 @@ async fn ratelimit_handler(r: &mut Request) -> Status {
                 error!("Could not get remote address");
                 return Status::Declined;
             }
-        },
+        }
         // カスタムヘッダーやその他のキーに対応する場合
         _ => {
             if ctx.config.rate_limit_key.starts_with("http_") {
@@ -213,8 +231,13 @@ async fn ratelimit_handler(r: &mut Request) -> Status {
 
     if !allowed {
         r.set_status(Status::Forbidden);
-        r.headers_out().set("X-RateLimit-Limit", &ctx.config.requests_per_second.to_string());
+        r.headers_out().set(
+            "X-RateLimit-Limit",
+            &ctx.config.requests_per_second.to_string(),
+        );
         r.headers_out().set("X-RateLimit-Remaining", "0");
+        r.headers_out()
+            .set("X-RateLimit-Algorithm", &ctx.config.algorithm.to_string());
         r.headers_out().set("Content-Type", "application/json");
 
         let body = r#"{"error": "rate limit exceeded"}"#;
@@ -236,15 +259,8 @@ async fn http_preinit(cmcf: &mut HttpMainConf) -> Result<(), String> {
 }
 
 #[nginx_module_export]
-static mut ngx_ratelimit_redis_commands: [Command; 1] = [
-    Command::HttpMain(http_preinit),
-];
+static mut ngx_ratelimit_redis_commands: [Command; 1] = [Command::HttpMain(http_preinit)];
 
 #[nginx_module_init]
-static mut NGX_HTTP_MODULE: HttpModule = HttpModule::new(
-    module_init,
-    module_exit,
-    http_init,
-    None,
-    None,
-);
+static mut NGX_HTTP_MODULE: HttpModule =
+    HttpModule::new(module_init, module_exit, http_init, None, None);

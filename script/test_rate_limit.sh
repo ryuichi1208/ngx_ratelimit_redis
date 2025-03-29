@@ -13,6 +13,7 @@ PORT="8080"
 REQUESTS=15  # 送信するリクエスト数
 WAIT_TIME=0.1  # リクエスト間の待機時間（秒）
 API_KEY="test-api-key"  # APIキーのデフォルト値
+ALGORITHM=""  # テスト対象のアルゴリズム
 
 # 使用方法を表示
 function show_usage {
@@ -23,6 +24,7 @@ function show_usage {
   echo "  -n, --requests  送信するリクエスト数 (デフォルト: 15)"
   echo "  -w, --wait      リクエスト間の待機時間（秒） (デフォルト: 0.1)"
   echo "  -k, --key       APIキー (デフォルト: test-api-key)"
+  echo "  -a, --algorithm レート制限アルゴリズム (sliding, fixed, token, leaky, all)"
   echo "  --help          このヘルプメッセージを表示"
   exit 1
 }
@@ -48,6 +50,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     -k|--key)
       API_KEY="$2"
+      shift 2
+      ;;
+    -a|--algorithm)
+      ALGORITHM="$2"
       shift 2
       ;;
     --help)
@@ -97,7 +103,9 @@ function run_test {
       echo -e "${RED}レート制限 (403)${NC}"
       echo -e "  ${YELLOW}レスポンス: $body${NC}"
       # レート制限ヘッダーがあれば表示
-      curl -s -I -H "$header" "${BASE_URL}${endpoint}" | grep -i "X-RateLimit" || true
+      headers=$(curl -s -I -H "$header" "${BASE_URL}${endpoint}")
+      echo -e "  ${YELLOW}ヘッダー:${NC}"
+      echo "$headers" | grep -i "X-RateLimit" || true
       ((count_limited++))
     else
       echo -e "${YELLOW}その他 ($response)${NC}"
@@ -121,16 +129,52 @@ echo -e "${BLUE}=====================================${NC}"
 echo -e "${BLUE}Redisレートリミットテスト${NC}"
 echo -e "${BLUE}=====================================${NC}\n"
 
-# テスト1: ルートパスへのリクエスト（IPベースのレート制限）
-run_test "/" "" "IPベースのレート制限テスト"
+# アルゴリズム別にエンドポイントを設定
+declare -A algorithm_endpoints
+algorithm_endpoints["sliding"]="/sliding"
+algorithm_endpoints["fixed"]="/fixed"
+algorithm_endpoints["token"]="/token"
+algorithm_endpoints["leaky"]="/leaky"
+algorithm_endpoints["default"]="/"
 
-# テスト2: APIエンドポイントへのリクエスト（APIキーベースのレート制限）
-run_test "/api" "X-API-Key: ${API_KEY}" "APIキーベースのレート制限テスト"
+# アルゴリズム別のテスト
+if [ "$ALGORITHM" == "all" ]; then
+  # すべてのアルゴリズムをテスト
+  for alg in "default" "sliding" "fixed" "token" "leaky"; do
+    endpoint=${algorithm_endpoints[$alg]}
+    if [ "$alg" == "default" ]; then
+      run_test "$endpoint" "" "デフォルトアルゴリズム (スライディングウィンドウ) テスト"
+    else
+      run_test "$endpoint" "" "${alg} アルゴリズムテスト"
+    fi
+  done
+elif [ -n "$ALGORITHM" ]; then
+  # 指定されたアルゴリズムをテスト
+  if [ -z "${algorithm_endpoints[$ALGORITHM]}" ]; then
+    echo -e "${RED}エラー: 不明なアルゴリズム '$ALGORITHM'${NC}"
+    echo "サポートされるアルゴリズム: sliding, fixed, token, leaky, default, all"
+    exit 1
+  fi
 
-# テスト3: 静的リソースへのリクエスト（レート制限なし）
-run_test "/static" "" "レート制限なしのテスト"
+  endpoint=${algorithm_endpoints[$ALGORITHM]}
+  if [ "$ALGORITHM" == "default" ]; then
+    run_test "$endpoint" "" "デフォルトアルゴリズム (スライディングウィンドウ) テスト"
+  else
+    run_test "$endpoint" "" "${ALGORITHM} アルゴリズムテスト"
+  fi
+else
+  # デフォルトテスト
+  # テスト1: ルートパスへのリクエスト（IPベースのレート制限）
+  run_test "/" "" "IPベースのレート制限テスト"
 
-# テスト4: 異なるAPIキーでのテスト
-run_test "/api" "X-API-Key: another-${API_KEY}" "異なるAPIキーでのテスト"
+  # テスト2: APIエンドポイントへのリクエスト（APIキーベースのレート制限）
+  run_test "/api" "X-API-Key: ${API_KEY}" "APIキーベースのレート制限テスト"
+
+  # テスト3: 静的リソースへのリクエスト（レート制限なし）
+  run_test "/static" "" "レート制限なしのテスト"
+
+  # テスト4: 異なるAPIキーでのテスト
+  run_test "/api" "X-API-Key: another-${API_KEY}" "異なるAPIキーでのテスト"
+fi
 
 echo -e "${GREEN}テスト完了${NC}"
