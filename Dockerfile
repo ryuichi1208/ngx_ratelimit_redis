@@ -1,4 +1,4 @@
-FROM rust:1.71-buster as builder
+FROM rust:1.79-buster as builder
 
 # 依存パッケージのインストール
 RUN apt-get update && apt-get install -y \
