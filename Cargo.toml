@@ -8,7 +8,7 @@ authors = ["ryuichi1208"]
 crate-type = ["cdylib"]
 
 [dependencies]
-nginx = { version = "0.4.1", features = ["http"] }
+nginx = { version = "0.10.0", features = ["http"] }
 redis = { version = "0.23.0", features = ["tokio-comp"] }
 lazy_static = "1.4.0"
 tokio = { version = "1.28.1", features = ["rt", "time", "sync"] }
