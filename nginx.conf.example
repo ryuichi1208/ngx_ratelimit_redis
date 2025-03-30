@@ -8,73 +8,64 @@ events {
 load_module modules/libngx_ratelimit_redis.so;
 
 http {
+    # グローバル設定ファイルの指定
+    ratelimit_redis_config /path/to/config.json;
+
     server {
         listen 8080;
         server_name localhost;
 
-        # すべてのIPアドレスに対して、毎秒10リクエストまで許可（バースト5）
-        # デフォルトアルゴリズム: スライディングウィンドウ
+        # 方法1: 設定ファイルから設定を読み込む場合
+        # すべてのLocationの設定はconfig.jsonから読み込まれます
         location / {
-            # モジュールを有効化し、オプションを設定
-            ratelimit_redis on redis_url=redis://127.0.0.1:6379 key=remote_addr rate=10 burst=5;
+            # 設定ファイルで定義されたデフォルト設定または "/", キーに対応する設定が使用されます
+            ratelimit_redis on;
 
-            # レート制限に引っかかった場合、403 Forbiddenを返し、
-            # それ以外の場合は次のハンドラに処理を渡す
-
-            # 他のディレクティブ...
             root html;
             index index.html index.htm;
         }
 
-        # 固定ウィンドウアルゴリズムを使用したレート制限
-        location /fixed {
-            ratelimit_redis on redis_url=redis://127.0.0.1:6379 key=remote_addr rate=10 burst=5 algorithm=fixed_window window_size=60;
-
-            # ハンドラ処理...
-            return 200 "Fixed Window Algorithm";
-        }
-
-        # トークンバケットアルゴリズムを使用したレート制限
-        location /token {
-            ratelimit_redis on redis_url=redis://127.0.0.1:6379 key=remote_addr rate=10 burst=20 algorithm=token_bucket;
-
-            # ハンドラ処理...
-            return 200 "Token Bucket Algorithm";
-        }
-
-        # リーキーバケットアルゴリズムを使用したレート制限
-        location /leaky {
-            ratelimit_redis on redis_url=redis://127.0.0.1:6379 key=remote_addr rate=5 burst=10 algorithm=leaky_bucket;
-
-            # ハンドラ処理...
-            return 200 "Leaky Bucket Algorithm";
-        }
-
-        # スライディングウィンドウアルゴリズムを明示的に使用
-        location /sliding {
-            ratelimit_redis on redis_url=redis://127.0.0.1:6379 key=remote_addr rate=15 burst=5 algorithm=sliding_window window_size=30;
-
-            # ハンドラ処理...
-            return 200 "Sliding Window Algorithm";
-        }
-
-        # APIキーを使用したレート制限の例
         location /api {
-            # APIキーを使用したレート制限（X-API-Keyヘッダー）
-            # 毎秒5リクエストまで許可（バースト2）
-            ratelimit_redis on redis_url=redis://127.0.0.1:6379 key=http_x_api_key rate=5 burst=2;
+            # 設定ファイルの"/api"に対応する設定が使用されます
+            ratelimit_redis on;
 
             # ハンドラ処理...
             return 200 "API Response";
         }
 
-        # 特定のパスに対してレート制限しない例
-        location /static {
-            # レート制限を無効化
+        location /fixed {
+            # 設定ファイルの"/fixed"に対応する設定が使用されます
+            ratelimit_redis on;
+
+            # ハンドラ処理...
+            return 200 "Fixed Window Algorithm";
+        }
+
+        # 方法2: 個別の設定ファイルを指定する場合
+        location /custom {
+            # 特定のLocationだけ別の設定ファイルを使用することも可能
+            ratelimit_redis on config_file=/path/to/custom_config.json;
+
+            # ハンドラ処理...
+            return 200 "Custom Config";
+        }
+
+        # 方法3: 従来の方法（ディレクティブパラメータで直接設定）
+        location /direct {
+            # 直接パラメータで設定することもできます
+            ratelimit_redis on redis_url=redis://127.0.0.1:6379 key=remote_addr rate=10 burst=5 algorithm=sliding_window window_size=60;
+
+            # ハンドラ処理...
+            return 200 "Direct Configuration";
+        }
+
+        # 設定ファイルの設定を無効化
+        location /override {
+            # 設定ファイルがあっても、これは無効化されます
             ratelimit_redis off;
 
-            # 静的ファイルの処理...
-            alias /path/to/static;
+            # ハンドラ処理...
+            return 200 "Rate Limiting Disabled";
         }
     }
 }

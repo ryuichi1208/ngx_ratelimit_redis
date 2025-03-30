@@ -2,11 +2,15 @@ use lazy_static::lazy_static;
 use log::{debug, error, info};
 use nginx::core::*;
 use nginx::http::*;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 
+mod config;
 mod redis_client;
+
+use config::{ConfigFile, RateLimitSettings};
 use redis_client::{RateLimitAlgorithm, RateLimitConfig, RedisRateLimiter};
 
 // モジュールの設定構造体
@@ -19,6 +23,7 @@ struct RateLimitRedisConfig {
     enabled: bool,
     algorithm: RateLimitAlgorithm,
     window_size: u32,
+    config_file_path: Option<String>,
 }
 
 impl Default for RateLimitRedisConfig {
@@ -31,14 +36,18 @@ impl Default for RateLimitRedisConfig {
             enabled: false,
             algorithm: RateLimitAlgorithm::SlidingWindow,
             window_size: 60,
+            config_file_path: None,
         }
     }
 }
 
-// グローバルなランタイムとRedisクライアントの保持
+// グローバルなランタイム、Redisクライアント、設定ファイルの保持
 lazy_static! {
     static ref RUNTIME: Runtime = Runtime::new().expect("Failed to create Tokio runtime");
     static ref REDIS_LIMITER: Arc<Mutex<Option<RedisRateLimiter>>> = Arc::new(Mutex::new(None));
+    static ref CONFIG_FILE: Arc<Mutex<Option<ConfigFile>>> = Arc::new(Mutex::new(None));
+    static ref LOCATION_SETTINGS: Arc<Mutex<HashMap<String, RateLimitRedisConfig>>> =
+        Arc::new(Mutex::new(HashMap::new()));
 }
 
 // モジュールのコンテキスト管理
@@ -69,6 +78,94 @@ async fn module_exit() -> Result<(), String> {
 async fn http_init(cmcf: &mut HttpMainConf) -> Result<(), String> {
     let handler_loc = HttpLocationHandler::new(ratelimit_handler);
     let _ = cmcf.register_loc_handler("ratelimit_redis", handler_loc);
+
+    Ok(())
+}
+
+// 設定ファイルの読み込み
+async fn load_config_file(path: &str) -> Result<ConfigFile, String> {
+    match ConfigFile::from_file(path) {
+        Ok(config) => {
+            info!("Successfully loaded configuration from {}", path);
+            Ok(config)
+        }
+        Err(e) => {
+            error!("Failed to load configuration file: {}", e);
+            Err(e)
+        }
+    }
+}
+
+// 設定ファイルから特定のLocationの設定を取得して適用
+fn apply_config_from_file(config_file: &ConfigFile, location: &str) -> RateLimitRedisConfig {
+    let settings = config_file.get_settings(location);
+    apply_settings_to_config(settings)
+}
+
+// RateLimitSettingsからRateLimitRedisConfigを生成
+fn apply_settings_to_config(settings: RateLimitSettings) -> RateLimitRedisConfig {
+    let algorithm = ConfigFile::parse_algorithm(&settings.algorithm)
+        .unwrap_or(RateLimitAlgorithm::SlidingWindow);
+
+    RateLimitRedisConfig {
+        redis_url: settings.redis_url,
+        rate_limit_key: settings.key,
+        requests_per_second: settings.rate,
+        burst: settings.burst,
+        enabled: settings.enabled,
+        algorithm,
+        window_size: settings.window_size,
+        config_file_path: None,
+    }
+}
+
+// "ratelimit_redis_config" ディレクティブの設定ハンドラ
+#[nginx_handler]
+async fn ratelimit_redis_config_command(
+    cf: &mut HttpConfRef,
+    cmd: &CommandArgs,
+) -> Result<(), String> {
+    let args = cmd.args();
+    if args.len() != 1 {
+        return Err("Syntax: ratelimit_redis_config /path/to/config.json".to_string());
+    }
+
+    let config_path = args[0].as_str().to_string();
+    info!("Loading rate limit configuration from {}", config_path);
+
+    // 設定ファイルを読み込む
+    let config_file = match RUNTIME.block_on(load_config_file(&config_path)) {
+        Ok(config) => config,
+        Err(e) => return Err(format!("Failed to load config file: {}", e)),
+    };
+
+    // グローバル設定に保存
+    let mut global_config = CONFIG_FILE.lock().await;
+    *global_config = Some(config_file);
+
+    // デフォルト設定を取得
+    if let Some(config) = &*global_config {
+        // Redisの初期化
+        if config.default.enabled {
+            let limiter_config = RateLimitConfig {
+                redis_url: config.default.redis_url.clone(),
+                requests_per_second: config.default.rate,
+                burst: config.default.burst,
+                algorithm: ConfigFile::parse_algorithm(&config.default.algorithm)
+                    .unwrap_or(RateLimitAlgorithm::SlidingWindow),
+                window_size: config.default.window_size,
+            };
+
+            match RUNTIME.block_on(async {
+                let mut limiter = REDIS_LIMITER.lock().await;
+                *limiter = Some(RedisRateLimiter::new(limiter_config).await?);
+                Ok::<(), String>(())
+            }) {
+                Ok(_) => info!("Redis Rate Limiter initialized from config file"),
+                Err(e) => error!("Failed to initialize Redis connection: {}", e),
+            }
+        }
+    }
 
     Ok(())
 }
@@ -136,9 +233,45 @@ async fn ratelimit_redis_command(cf: &mut HttpConfRef, cmd: &CommandArgs) -> Res
             } else {
                 return Err(format!("Invalid window_size value: {}", window_str));
             }
+        } else if arg.starts_with("config_file=") {
+            let file_path = arg.trim_start_matches("config_file=").to_string();
+            config.config_file_path = Some(file_path);
         } else {
             return Err(format!("Unknown parameter: {}", arg));
         }
+    }
+
+    // config_file指定がある場合は設定ファイルを読み込む
+    if let Some(file_path) = &config.config_file_path {
+        let config_file = match RUNTIME.block_on(load_config_file(file_path)) {
+            Ok(cfg) => cfg,
+            Err(e) => return Err(format!("Failed to load config file: {}", e)),
+        };
+
+        // 現在のロケーションの設定を適用
+        let location = cf.loc_conf_get_path().to_string();
+        let location_config = apply_config_from_file(&config_file, &location);
+
+        // 設定をマージ
+        config.redis_url = location_config.redis_url;
+        config.rate_limit_key = location_config.rate_limit_key;
+        config.requests_per_second = location_config.requests_per_second;
+        config.burst = location_config.burst;
+        config.algorithm = location_config.algorithm;
+        config.window_size = location_config.window_size;
+
+        // enabledはコマンドラインの設定を優先
+        if enabled {
+            config.enabled = location_config.enabled;
+        }
+
+        // グローバル設定として保存
+        let mut global_config = CONFIG_FILE.lock().await;
+        *global_config = Some(config_file);
+
+        // ロケーション固有の設定を保存
+        let mut location_settings = LOCATION_SETTINGS.lock().await;
+        location_settings.insert(location.clone(), config.clone());
     }
 
     // コンテキストの更新
@@ -146,7 +279,7 @@ async fn ratelimit_redis_command(cf: &mut HttpConfRef, cmd: &CommandArgs) -> Res
     cf.set_module_ctx(new_ctx);
 
     // Redis接続の初期化
-    if enabled {
+    if config.enabled {
         let limiter_config = RateLimitConfig {
             redis_url: config.redis_url.clone(),
             requests_per_second: config.requests_per_second,
@@ -174,20 +307,39 @@ async fn ratelimit_redis_command(cf: &mut HttpConfRef, cmd: &CommandArgs) -> Res
 // リクエストハンドラ
 #[nginx_handler]
 async fn ratelimit_handler(r: &mut Request) -> Status {
-    let ctx = r.get_module_ctx::<ModuleContext>().unwrap_or_else(|| {
-        let ctx = ModuleContext {
-            config: RateLimitRedisConfig::default(),
-        };
-        r.set_module_ctx(ctx.clone());
-        ctx
-    });
+    // 現在のリクエストのロケーションパスを取得
+    let location_path = r.get_location_path().to_string();
 
-    if !ctx.config.enabled {
+    // ロケーション固有の設定を確認
+    let mut config = {
+        let location_settings = LOCATION_SETTINGS.lock().await;
+        if let Some(cfg) = location_settings.get(&location_path) {
+            cfg.clone()
+        } else {
+            // グローバルな設定から該当するロケーションの設定を探す
+            let global_config = CONFIG_FILE.lock().await;
+            if let Some(cfg) = &*global_config {
+                apply_config_from_file(cfg, &location_path)
+            } else {
+                // Context から設定を取得
+                let ctx = r.get_module_ctx::<ModuleContext>().unwrap_or_else(|| {
+                    let ctx = ModuleContext {
+                        config: RateLimitRedisConfig::default(),
+                    };
+                    r.set_module_ctx(ctx.clone());
+                    ctx
+                });
+                ctx.config.clone()
+            }
+        }
+    };
+
+    if !config.enabled {
         return Status::Declined;
     }
 
     // レート制限キー（例：IPアドレス）の取得
-    let key = match ctx.config.rate_limit_key.as_str() {
+    let key = match config.rate_limit_key.as_str() {
         "remote_addr" => {
             if let Some(addr) = r.connection().remote_addr() {
                 addr.to_string()
@@ -198,8 +350,8 @@ async fn ratelimit_handler(r: &mut Request) -> Status {
         }
         // カスタムヘッダーやその他のキーに対応する場合
         _ => {
-            if ctx.config.rate_limit_key.starts_with("http_") {
-                let header_name = ctx.config.rate_limit_key.trim_start_matches("http_");
+            if config.rate_limit_key.starts_with("http_") {
+                let header_name = config.rate_limit_key.trim_start_matches("http_");
                 if let Some(value) = r.headers_in().get(header_name) {
                     value.to_string()
                 } else {
@@ -207,7 +359,7 @@ async fn ratelimit_handler(r: &mut Request) -> Status {
                     return Status::Declined;
                 }
             } else {
-                ctx.config.rate_limit_key.clone()
+                config.rate_limit_key.clone()
             }
         }
     };
@@ -231,13 +383,11 @@ async fn ratelimit_handler(r: &mut Request) -> Status {
 
     if !allowed {
         r.set_status(Status::Forbidden);
-        r.headers_out().set(
-            "X-RateLimit-Limit",
-            &ctx.config.requests_per_second.to_string(),
-        );
+        r.headers_out()
+            .set("X-RateLimit-Limit", &config.requests_per_second.to_string());
         r.headers_out().set("X-RateLimit-Remaining", "0");
         r.headers_out()
-            .set("X-RateLimit-Algorithm", &ctx.config.algorithm.to_string());
+            .set("X-RateLimit-Algorithm", &config.algorithm.to_string());
         r.headers_out().set("Content-Type", "application/json");
 
         let body = r#"{"error": "rate limit exceeded"}"#;
@@ -252,8 +402,11 @@ async fn ratelimit_handler(r: &mut Request) -> Status {
 // モジュールコマンドの登録
 #[nginx_handler]
 async fn http_preinit(cmcf: &mut HttpMainConf) -> Result<(), String> {
-    let cmd = HttpCommand::new(ratelimit_redis_command);
-    cmcf.register_command("ratelimit_redis", cmd)?;
+    let ratelimit_cmd = HttpCommand::new(ratelimit_redis_command);
+    cmcf.register_command("ratelimit_redis", ratelimit_cmd)?;
+
+    let config_cmd = HttpCommand::new(ratelimit_redis_config_command);
+    cmcf.register_command("ratelimit_redis_config", config_cmd)?;
 
     Ok(())
 }

@@ -15,6 +15,7 @@ A rate limiting module for NGINX using Redis as a backend. Implemented in Rust u
   - Fixed Window
   - Token Bucket
   - Leaky Bucket
+- Configuration via JSON files or directive parameters
 
 ## Building
 
@@ -58,7 +59,67 @@ sudo cp target/release/libngx_ratelimit_redis.dylib /usr/local/opt/nginx/modules
 
 ## Configuration
 
-Load the module in your NGINX configuration file and configure it:
+There are two ways to configure the module:
+1. Using JSON configuration files
+2. Using directive parameters directly in the NGINX configuration
+
+### Configuration with JSON File
+
+Create a JSON configuration file (e.g., `ratelimit.json`):
+
+```json
+{
+  "default": {
+    "redis_url": "redis://127.0.0.1:6379",
+    "key": "remote_addr",
+    "rate": 10,
+    "burst": 5,
+    "algorithm": "sliding_window",
+    "window_size": 60,
+    "enabled": true
+  },
+  "locations": {
+    "/api": {
+      "key": "http_x_api_key",
+      "rate": 5,
+      "burst": 2,
+      "algorithm": "token_bucket"
+    },
+    "/static": {
+      "enabled": false
+    }
+  }
+}
+```
+
+Then reference this file in your NGINX configuration:
+
+```nginx
+# Load the module
+load_module modules/libngx_ratelimit_redis.so;
+
+http {
+    # Global configuration file
+    ratelimit_redis_config /path/to/ratelimit.json;
+
+    server {
+        # Each location will use settings from the JSON config file
+        location / {
+            ratelimit_redis on;
+            # Other directives...
+        }
+
+        location /api {
+            ratelimit_redis on;
+            # Other directives...
+        }
+    }
+}
+```
+
+### Configuration with Directive Parameters
+
+Alternatively, you can configure the module directly in the NGINX configuration:
 
 ```nginx
 # Load the module
@@ -78,6 +139,8 @@ http {
 }
 ```
 
+You can also mix both approaches, using the JSON file for global settings and overriding specific options with directive parameters.
+
 ### Configuration Options
 
 | Option       | Description                              | Default Value           |
@@ -89,6 +152,7 @@ http {
 | burst        | Temporarily allowed excess requests      | 5                       |
 | algorithm    | Rate limiting algorithm                  | sliding_window          |
 | window_size  | Time window size in seconds              | 60                      |
+| config_file  | Path to a JSON configuration file        | -                       |
 
 ### Key Types
 
@@ -108,6 +172,33 @@ The module supports the following rate limiting algorithms:
 4. **Leaky Bucket** (`leaky_bucket`): Processes requests at a constant rate, effectively smoothing out bursty traffic.
 
 ## Usage Examples
+
+### Using JSON Configuration File
+
+```nginx
+# Global configuration file
+ratelimit_redis_config /path/to/config.json;
+
+# Use settings from the configuration file
+location / {
+    ratelimit_redis on;
+    # ...
+}
+
+# Override with location-specific configuration file
+location /custom {
+    ratelimit_redis on config_file=/path/to/custom_config.json;
+    # ...
+}
+
+# Disable rate limiting for this location
+location /static {
+    ratelimit_redis off;
+    # ...
+}
+```
+
+### Using Directive Parameters
 
 ```nginx
 # Default algorithm (Sliding Window)
