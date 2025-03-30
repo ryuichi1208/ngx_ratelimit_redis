@@ -20,7 +20,7 @@ ARG NGX_VERSION=1.26.3
 RUN NGX_VERSION=${NGX_VERSION} cargo build --release
 
 # 実行環境
-FROM nginx:1.26-alpine
+FROM nginx:1.27-alpine
 
 # Redisをインストール
 RUN apk add --no-cache redis
