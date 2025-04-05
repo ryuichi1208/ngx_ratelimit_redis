@@ -1,7 +1,8 @@
 use lazy_static::lazy_static;
 use log::{debug, error, info};
-use ngx::core::*;
-use ngx::http::*;
+use nginx_rs::bindings::*;
+use nginx_rs::ffi::*;
+use nginx_rs::http;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
@@ -264,13 +265,15 @@ fn parse_redis_option(arg: &str, config: &mut RateLimitRedisConfig) -> Result<()
 // "ratelimit_redis" ディレクティブの設定ハンドラ
 #[nginx_handler]
 async fn ratelimit_redis_command(cf: &mut HttpConfRef, cmd: &CommandArgs) -> Result<(), String> {
-    let ctx = cf.get_module_ctx::<ModuleContext>().unwrap_or_else(|| {
-        let ctx = ModuleContext {
-            config: RateLimitRedisConfig::default(),
-        };
-        cf.set_module_ctx(ctx.clone());
-        ctx
-    });
+    let ctx = cf
+        .get_module_ctx::<ModuleContext>(&ngx_ratelimit_redis_module)
+        .unwrap_or_else(|| {
+            let ctx = ModuleContext {
+                config: RateLimitRedisConfig::default(),
+            };
+            cf.set_module_ctx(&ngx_ratelimit_redis_module, &ctx);
+            ctx
+        });
 
     let mut config = ctx.config.clone();
 
@@ -371,7 +374,7 @@ async fn ratelimit_redis_command(cf: &mut HttpConfRef, cmd: &CommandArgs) -> Res
 
     // コンテキストの更新
     let new_ctx = ModuleContext { config };
-    cf.set_module_ctx(new_ctx);
+    cf.set_module_ctx(&ngx_ratelimit_redis_module, &new_ctx);
 
     // Redis接続の初期化
     if config.enabled {
@@ -425,13 +428,15 @@ async fn ratelimit_handler(r: &mut Request) -> Status {
                 apply_config_from_file(cfg, &location_path)
             } else {
                 // Context から設定を取得
-                let ctx = r.get_module_ctx::<ModuleContext>().unwrap_or_else(|| {
-                    let ctx = ModuleContext {
-                        config: RateLimitRedisConfig::default(),
-                    };
-                    r.set_module_ctx(ctx.clone());
-                    ctx
-                });
+                let ctx = r
+                    .get_module_ctx::<ModuleContext>(&ngx_ratelimit_redis_module)
+                    .unwrap_or_else(|| {
+                        let ctx = ModuleContext {
+                            config: RateLimitRedisConfig::default(),
+                        };
+                        r.set_module_ctx(&ngx_ratelimit_redis_module, &ctx);
+                        ctx
+                    });
                 ctx.config.clone()
             }
         }
