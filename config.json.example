@@ -6,7 +6,18 @@
     "burst": 5,
     "algorithm": "sliding_window",
     "window_size": 60,
-    "enabled": true
+    "enabled": true,
+    "redis_options": {
+      "connect_timeout": 5000,
+      "command_timeout": 2000,
+      "retry_count": 3,
+      "retry_delay": 500,
+      "database": 0,
+      "pool_size": 10,
+      "cluster_mode": false,
+      "tls_enabled": false,
+      "keepalive": 0
+    }
   },
   "locations": {
     "/": {
@@ -20,7 +31,11 @@
       "rate": 5,
       "burst": 2,
       "algorithm": "token_bucket",
-      "window_size": 120
+      "window_size": 120,
+      "redis_options": {
+        "command_timeout": 1000,
+        "retry_count": 5
+      }
     },
     "/fixed": {
       "rate": 15,
@@ -43,6 +58,27 @@
       "burst": 5,
       "algorithm": "sliding_window",
       "window_size": 30
+    },
+    "/secure": {
+      "rate": 20,
+      "burst": 5,
+      "algorithm": "sliding_window",
+      "redis_options": {
+        "password": "secure_password",
+        "database": 1,
+        "tls_enabled": true
+      }
+    },
+    "/highly-available": {
+      "rate": 15,
+      "burst": 5,
+      "algorithm": "sliding_window",
+      "redis_options": {
+        "cluster_mode": true,
+        "connect_timeout": 10000,
+        "retry_count": 10,
+        "retry_delay": 1000
+      }
     },
     "/static": {
       "enabled": false

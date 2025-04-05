@@ -11,7 +11,7 @@ mod config;
 mod redis_client;
 
 use config::{ConfigFile, RateLimitSettings};
-use redis_client::{RateLimitAlgorithm, RateLimitConfig, RedisRateLimiter};
+use redis_client::{RateLimitAlgorithm, RateLimitConfig, RedisConnectionOptions, RedisRateLimiter};
 
 // モジュールの設定構造体
 #[derive(Debug, Clone)]
@@ -24,6 +24,7 @@ struct RateLimitRedisConfig {
     algorithm: RateLimitAlgorithm,
     window_size: u32,
     config_file_path: Option<String>,
+    redis_options: RedisConnectionOptions,
 }
 
 impl Default for RateLimitRedisConfig {
@@ -37,6 +38,7 @@ impl Default for RateLimitRedisConfig {
             algorithm: RateLimitAlgorithm::SlidingWindow,
             window_size: 60,
             config_file_path: None,
+            redis_options: RedisConnectionOptions::default(),
         }
     }
 }
@@ -116,6 +118,7 @@ fn apply_settings_to_config(settings: RateLimitSettings) -> RateLimitRedisConfig
         algorithm,
         window_size: settings.window_size,
         config_file_path: None,
+        redis_options: settings.redis_options,
     }
 }
 
@@ -154,6 +157,7 @@ async fn ratelimit_redis_config_command(
                 algorithm: ConfigFile::parse_algorithm(&config.default.algorithm)
                     .unwrap_or(RateLimitAlgorithm::SlidingWindow),
                 window_size: config.default.window_size,
+                redis_options: config.default.redis_options.clone(),
             };
 
             match RUNTIME.block_on(async {
@@ -165,6 +169,93 @@ async fn ratelimit_redis_config_command(
                 Err(e) => error!("Failed to initialize Redis connection: {}", e),
             }
         }
+    }
+
+    Ok(())
+}
+
+// Redis接続オプションを解析する
+fn parse_redis_option(arg: &str, config: &mut RateLimitRedisConfig) -> Result<(), String> {
+    if arg.starts_with("redis_connect_timeout=") {
+        let timeout_str = arg.trim_start_matches("redis_connect_timeout=");
+        if let Ok(timeout) = timeout_str.parse::<u64>() {
+            config.redis_options.connect_timeout = timeout;
+        } else {
+            return Err(format!(
+                "Invalid redis_connect_timeout value: {}",
+                timeout_str
+            ));
+        }
+    } else if arg.starts_with("redis_command_timeout=") {
+        let timeout_str = arg.trim_start_matches("redis_command_timeout=");
+        if let Ok(timeout) = timeout_str.parse::<u64>() {
+            config.redis_options.command_timeout = timeout;
+        } else {
+            return Err(format!(
+                "Invalid redis_command_timeout value: {}",
+                timeout_str
+            ));
+        }
+    } else if arg.starts_with("redis_retry_count=") {
+        let retry_str = arg.trim_start_matches("redis_retry_count=");
+        if let Ok(retry) = retry_str.parse::<u32>() {
+            config.redis_options.retry_count = retry;
+        } else {
+            return Err(format!("Invalid redis_retry_count value: {}", retry_str));
+        }
+    } else if arg.starts_with("redis_retry_delay=") {
+        let delay_str = arg.trim_start_matches("redis_retry_delay=");
+        if let Ok(delay) = delay_str.parse::<u64>() {
+            config.redis_options.retry_delay = delay;
+        } else {
+            return Err(format!("Invalid redis_retry_delay value: {}", delay_str));
+        }
+    } else if arg.starts_with("redis_password=") {
+        let password = arg.trim_start_matches("redis_password=").to_string();
+        if !password.is_empty() {
+            config.redis_options.password = Some(password);
+        }
+    } else if arg.starts_with("redis_database=") {
+        let db_str = arg.trim_start_matches("redis_database=");
+        if let Ok(db) = db_str.parse::<i64>() {
+            config.redis_options.database = db;
+        } else {
+            return Err(format!("Invalid redis_database value: {}", db_str));
+        }
+    } else if arg.starts_with("redis_pool_size=") {
+        let pool_str = arg.trim_start_matches("redis_pool_size=");
+        if let Ok(pool) = pool_str.parse::<u32>() {
+            config.redis_options.pool_size = pool;
+        } else {
+            return Err(format!("Invalid redis_pool_size value: {}", pool_str));
+        }
+    } else if arg.starts_with("redis_cluster_mode=") {
+        let mode_str = arg.trim_start_matches("redis_cluster_mode=");
+        if mode_str == "on" {
+            config.redis_options.cluster_mode = true;
+        } else if mode_str == "off" {
+            config.redis_options.cluster_mode = false;
+        } else {
+            return Err(format!("Invalid redis_cluster_mode value: {}", mode_str));
+        }
+    } else if arg.starts_with("redis_tls=") {
+        let tls_str = arg.trim_start_matches("redis_tls=");
+        if tls_str == "on" {
+            config.redis_options.tls_enabled = true;
+        } else if tls_str == "off" {
+            config.redis_options.tls_enabled = false;
+        } else {
+            return Err(format!("Invalid redis_tls value: {}", tls_str));
+        }
+    } else if arg.starts_with("redis_keepalive=") {
+        let keepalive_str = arg.trim_start_matches("redis_keepalive=");
+        if let Ok(keepalive) = keepalive_str.parse::<u64>() {
+            config.redis_options.keepalive = keepalive;
+        } else {
+            return Err(format!("Invalid redis_keepalive value: {}", keepalive_str));
+        }
+    } else {
+        return Err(format!("Unknown Redis connection option: {}", arg));
     }
 
     Ok(())
@@ -236,6 +327,9 @@ async fn ratelimit_redis_command(cf: &mut HttpConfRef, cmd: &CommandArgs) -> Res
         } else if arg.starts_with("config_file=") {
             let file_path = arg.trim_start_matches("config_file=").to_string();
             config.config_file_path = Some(file_path);
+        } else if arg.starts_with("redis_") {
+            // Redis接続オプションを解析
+            parse_redis_option(arg, &mut config)?;
         } else {
             return Err(format!("Unknown parameter: {}", arg));
         }
@@ -259,6 +353,7 @@ async fn ratelimit_redis_command(cf: &mut HttpConfRef, cmd: &CommandArgs) -> Res
         config.burst = location_config.burst;
         config.algorithm = location_config.algorithm;
         config.window_size = location_config.window_size;
+        config.redis_options = location_config.redis_options;
 
         // enabledはコマンドラインの設定を優先
         if enabled {
@@ -286,6 +381,7 @@ async fn ratelimit_redis_command(cf: &mut HttpConfRef, cmd: &CommandArgs) -> Res
             burst: config.burst,
             algorithm: config.algorithm,
             window_size: config.window_size,
+            redis_options: config.redis_options,
         };
 
         match RUNTIME.block_on(async {
@@ -293,10 +389,17 @@ async fn ratelimit_redis_command(cf: &mut HttpConfRef, cmd: &CommandArgs) -> Res
             *limiter = Some(RedisRateLimiter::new(limiter_config).await?);
             Ok::<(), String>(())
         }) {
-            Ok(_) => info!(
-                "Redis Rate Limiter initialized with algorithm: {}",
-                config.algorithm
-            ),
+            Ok(_) => {
+                info!(
+                    "Redis Rate Limiter initialized with algorithm: {}",
+                    config.algorithm
+                );
+                info!("Redis connection options: connect_timeout={}ms, command_timeout={}ms, retry_count={}, database={}",
+                    config.redis_options.connect_timeout,
+                    config.redis_options.command_timeout,
+                    config.redis_options.retry_count,
+                    config.redis_options.database);
+            }
             Err(e) => error!("Failed to initialize Redis connection: {}", e),
         }
     }

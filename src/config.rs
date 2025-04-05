@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-use crate::redis_client::RateLimitAlgorithm;
+use crate::redis_client::{RateLimitAlgorithm, RedisConnectionOptions};
 
 /// レートリミットの設定を保持する構造体
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +37,10 @@ pub struct RateLimitSettings {
     /// モジュールの有効/無効
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+
+    /// Redis接続オプション
+    #[serde(default)]
+    pub redis_options: RedisConnectionOptions,
 }
 
 impl Default for RateLimitSettings {
@@ -49,6 +53,7 @@ impl Default for RateLimitSettings {
             algorithm: default_algorithm(),
             window_size: default_window_size(),
             enabled: default_enabled(),
+            redis_options: RedisConnectionOptions::default(),
         }
     }
 }
@@ -106,7 +111,47 @@ impl ConfigFile {
     /// 特定のLocationの設定を取得する。Locationが設定されていない場合はデフォルト設定を返す
     pub fn get_settings(&self, location: &str) -> RateLimitSettings {
         if let Some(location_settings) = self.locations.get(location) {
-            location_settings.clone()
+            // ロケーション固有の設定がある場合、デフォルト値から足りない項目を継承
+            let mut merged_settings = self.default.clone();
+
+            // デフォルト値が上書きされている項目のみを更新
+            if location_settings.redis_url != default_redis_url() {
+                merged_settings.redis_url = location_settings.redis_url.clone();
+            }
+
+            if location_settings.key != default_key() {
+                merged_settings.key = location_settings.key.clone();
+            }
+
+            if location_settings.rate != default_rate() {
+                merged_settings.rate = location_settings.rate;
+            }
+
+            if location_settings.burst != default_burst() {
+                merged_settings.burst = location_settings.burst;
+            }
+
+            if location_settings.algorithm != default_algorithm() {
+                merged_settings.algorithm = location_settings.algorithm.clone();
+            }
+
+            if location_settings.window_size != default_window_size() {
+                merged_settings.window_size = location_settings.window_size;
+            }
+
+            // 有効/無効フラグは明示的に設定されている場合のみ上書き
+            if location_settings.enabled != self.default.enabled {
+                merged_settings.enabled = location_settings.enabled;
+            }
+
+            // Redis接続オプションをマージ（設定されている項目のみを上書き）
+            // 注: デフォルト値と異なる項目のみをマージ
+            merge_redis_options(
+                &mut merged_settings.redis_options,
+                &location_settings.redis_options,
+            );
+
+            merged_settings
         } else {
             self.default.clone()
         }
@@ -115,6 +160,59 @@ impl ConfigFile {
     /// 設定からRateLimitAlgorithmを解析する
     pub fn parse_algorithm(algorithm_str: &str) -> Result<RateLimitAlgorithm, String> {
         RateLimitAlgorithm::from_str(algorithm_str)
+    }
+}
+
+/// Redis接続オプションをマージする（srcにある非デフォルト値のみをdestに適用）
+fn merge_redis_options(dest: &mut RedisConnectionOptions, src: &RedisConnectionOptions) {
+    // デフォルト値と異なる接続タイムアウトのみを適用
+    if src.connect_timeout != RedisConnectionOptions::default().connect_timeout {
+        dest.connect_timeout = src.connect_timeout;
+    }
+
+    // デフォルト値と異なるコマンドタイムアウトのみを適用
+    if src.command_timeout != RedisConnectionOptions::default().command_timeout {
+        dest.command_timeout = src.command_timeout;
+    }
+
+    // デフォルト値と異なるリトライ回数のみを適用
+    if src.retry_count != RedisConnectionOptions::default().retry_count {
+        dest.retry_count = src.retry_count;
+    }
+
+    // デフォルト値と異なるリトライ間隔のみを適用
+    if src.retry_delay != RedisConnectionOptions::default().retry_delay {
+        dest.retry_delay = src.retry_delay;
+    }
+
+    // パスワードが設定されている場合のみ適用
+    if src.password.is_some() {
+        dest.password = src.password.clone();
+    }
+
+    // デフォルト値と異なるデータベース番号のみを適用
+    if src.database != RedisConnectionOptions::default().database {
+        dest.database = src.database;
+    }
+
+    // デフォルト値と異なる接続プールサイズのみを適用
+    if src.pool_size != RedisConnectionOptions::default().pool_size {
+        dest.pool_size = src.pool_size;
+    }
+
+    // クラスタモードの設定
+    if src.cluster_mode != RedisConnectionOptions::default().cluster_mode {
+        dest.cluster_mode = src.cluster_mode;
+    }
+
+    // TLS設定
+    if src.tls_enabled != RedisConnectionOptions::default().tls_enabled {
+        dest.tls_enabled = src.tls_enabled;
+    }
+
+    // キープアライブ設定
+    if src.keepalive != RedisConnectionOptions::default().keepalive {
+        dest.keepalive = src.keepalive;
     }
 }
 

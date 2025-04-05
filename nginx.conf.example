@@ -59,6 +59,65 @@ http {
             return 200 "Direct Configuration";
         }
 
+        # 方法4: Redis接続オプションをコマンドラインで指定
+        location /redis-options {
+            # Redis接続オプションを指定
+            ratelimit_redis on redis_url=redis://127.0.0.1:6379
+                key=remote_addr
+                rate=10
+                burst=5
+                algorithm=sliding_window
+                redis_connect_timeout=3000
+                redis_command_timeout=1000
+                redis_retry_count=5
+                redis_retry_delay=300;
+
+            # ハンドラ処理...
+            return 200 "Redis Connection Options";
+        }
+
+        # 方法5: Redisクラスタを使用する設定
+        location /redis-cluster {
+            # Redisクラスタモードを有効にする
+            ratelimit_redis on redis_url=redis://127.0.0.1:6379
+                key=remote_addr
+                rate=15
+                burst=10
+                redis_cluster_mode=on
+                redis_connect_timeout=10000
+                redis_retry_count=10;
+
+            # ハンドラ処理...
+            return 200 "Redis Cluster Mode";
+        }
+
+        # 方法6: Redis認証を使用する設定
+        location /redis-auth {
+            # Redis認証情報を指定
+            ratelimit_redis on redis_url=redis://127.0.0.1:6379
+                key=remote_addr
+                rate=20
+                burst=5
+                redis_password=secret_password
+                redis_database=2;
+
+            # ハンドラ処理...
+            return 200 "Redis Authentication";
+        }
+
+        # 方法7: TLS接続を使用する設定
+        location /redis-tls {
+            # Redis TLS接続を有効にする
+            ratelimit_redis on redis_url=redis://127.0.0.1:6379
+                key=remote_addr
+                rate=15
+                burst=5
+                redis_tls=on;
+
+            # ハンドラ処理...
+            return 200 "Redis TLS Connection";
+        }
+
         # 設定ファイルの設定を無効化
         location /override {
             # 設定ファイルがあっても、これは無効化されます

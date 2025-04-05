@@ -1,5 +1,6 @@
 use log::{debug, error, info};
 use redis::{aio::Connection, AsyncCommands, Client, RedisError};
+use serde::{Deserialize, Serialize};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// レート制限アルゴリズムの種類
@@ -44,6 +45,92 @@ impl RateLimitAlgorithm {
     }
 }
 
+/// Redis接続のオプションを設定するための構造体
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedisConnectionOptions {
+    /// 接続タイムアウト（ミリ秒）
+    #[serde(default = "default_connect_timeout")]
+    pub connect_timeout: u64,
+
+    /// コマンド実行タイムアウト（ミリ秒）
+    #[serde(default = "default_command_timeout")]
+    pub command_timeout: u64,
+
+    /// 接続失敗時のリトライ回数
+    #[serde(default = "default_retry_count")]
+    pub retry_count: u32,
+
+    /// リトライ間の待機時間（ミリ秒）
+    #[serde(default = "default_retry_delay")]
+    pub retry_delay: u64,
+
+    /// 認証パスワード（オプション）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+
+    /// 使用するデータベース番号
+    #[serde(default = "default_database")]
+    pub database: i64,
+
+    /// 接続プールの最大サイズ
+    #[serde(default = "default_pool_size")]
+    pub pool_size: u32,
+
+    /// クラスタモードを有効にするかどうか
+    #[serde(default)]
+    pub cluster_mode: bool,
+
+    /// TLS接続を有効にするかどうか
+    #[serde(default)]
+    pub tls_enabled: bool,
+
+    /// キープアライブ間隔（秒、0の場合は無効）
+    #[serde(default)]
+    pub keepalive: u64,
+}
+
+impl Default for RedisConnectionOptions {
+    fn default() -> Self {
+        Self {
+            connect_timeout: default_connect_timeout(),
+            command_timeout: default_command_timeout(),
+            retry_count: default_retry_count(),
+            retry_delay: default_retry_delay(),
+            password: None,
+            database: default_database(),
+            pool_size: default_pool_size(),
+            cluster_mode: false,
+            tls_enabled: false,
+            keepalive: 0,
+        }
+    }
+}
+
+// デフォルト値関数
+fn default_connect_timeout() -> u64 {
+    5000 // 5秒
+}
+
+fn default_command_timeout() -> u64 {
+    2000 // 2秒
+}
+
+fn default_retry_count() -> u32 {
+    3
+}
+
+fn default_retry_delay() -> u64 {
+    500 // 500ミリ秒
+}
+
+fn default_database() -> i64 {
+    0
+}
+
+fn default_pool_size() -> u32 {
+    10
+}
+
 #[derive(Debug, Clone)]
 pub struct RateLimitConfig {
     pub redis_url: String,
@@ -51,6 +138,7 @@ pub struct RateLimitConfig {
     pub burst: u32,
     pub algorithm: RateLimitAlgorithm,
     pub window_size: u32, // 秒単位のウィンドウサイズ（固定ウィンドウとスライディングウィンドウ用）
+    pub redis_options: RedisConnectionOptions,
 }
 
 impl Default for RateLimitConfig {
@@ -61,6 +149,7 @@ impl Default for RateLimitConfig {
             burst: 5,
             algorithm: RateLimitAlgorithm::SlidingWindow,
             window_size: 60, // デフォルトは1分
+            redis_options: RedisConnectionOptions::default(),
         }
     }
 }
@@ -76,7 +165,52 @@ impl RedisRateLimiter {
         info!("Connecting to Redis at: {}", config.redis_url);
         info!("Using rate limit algorithm: {}", config.algorithm);
 
-        let client = match Client::open(config.redis_url.clone()) {
+        // 接続オプションをログに出力
+        info!("Redis connection options: connect_timeout={}ms, command_timeout={}ms, retry_count={}, database={}",
+            config.redis_options.connect_timeout,
+            config.redis_options.command_timeout,
+            config.redis_options.retry_count,
+            config.redis_options.database);
+
+        // カスタム接続オプションを適用したURL構築
+        let url_str = if let Some(pwd) = &config.redis_options.password {
+            // パスワードがある場合はURLに組み込む
+            let mut redis_url = redis::parse_redis_url(&config.redis_url)
+                .map_err(|e| format!("Failed to parse Redis URL: {}", e))?;
+
+            // 認証情報を更新
+            redis_url.password = Some(pwd.clone());
+            redis_url.db = config.redis_options.database;
+
+            redis_url.to_string()
+        } else {
+            // パスワードがない場合は元のURLを使用
+            config.redis_url.clone()
+        };
+
+        // Redisクライアントオプションを構築
+        let client_builder = redis::Client::build_with_options(redis::ClientOptions {
+            url: url_str.clone(),
+            ..Default::default()
+        });
+
+        // 接続タイムアウトを設定
+        let client_builder = if config.redis_options.connect_timeout > 0 {
+            client_builder
+                .connection_timeout(Duration::from_millis(config.redis_options.connect_timeout))
+        } else {
+            client_builder
+        };
+
+        // キープアライブを設定
+        let client_builder = if config.redis_options.keepalive > 0 {
+            client_builder.keep_alive(Duration::from_secs(config.redis_options.keepalive))
+        } else {
+            client_builder
+        };
+
+        // クライアントを構築
+        let client = match client_builder.build() {
             Ok(client) => client,
             Err(err) => {
                 error!("Failed to create Redis client: {}", err);
@@ -84,30 +218,80 @@ impl RedisRateLimiter {
             }
         };
 
-        // 接続テスト
-        let mut conn = match client.get_async_connection().await {
-            Ok(conn) => conn,
-            Err(err) => {
-                error!("Failed to connect to Redis: {}", err);
-                return Err(format!("Failed to connect to Redis: {}", err));
-            }
-        };
+        // 接続テスト（リトライロジックを使用）
+        let mut last_error = None;
+        let mut conn = None;
 
-        // PINGでRedisサーバーが応答するか確認
-        match redis::cmd("PING").query_async::<_, String>(&mut conn).await {
-            Ok(response) => {
-                if response != "PONG" {
-                    error!("Unexpected response from Redis server: {}", response);
-                    return Err(format!(
-                        "Unexpected response from Redis server: {}",
-                        response
-                    ));
+        for attempt in 0..=config.redis_options.retry_count {
+            match client.get_async_connection().await {
+                Ok(connection) => {
+                    conn = Some(connection);
+                    break;
                 }
-                info!("Successfully connected to Redis");
+                Err(err) => {
+                    error!(
+                        "Failed to connect to Redis (attempt {}/{}): {}",
+                        attempt + 1,
+                        config.redis_options.retry_count + 1,
+                        err
+                    );
+                    last_error = Some(err);
+
+                    if attempt < config.redis_options.retry_count {
+                        // リトライ前に待機
+                        tokio::time::sleep(Duration::from_millis(config.redis_options.retry_delay))
+                            .await;
+                    }
+                }
             }
-            Err(err) => {
-                error!("Failed to ping Redis server: {}", err);
-                return Err(format!("Failed to ping Redis server: {}", err));
+        }
+
+        // 全てのリトライが失敗した場合
+        if conn.is_none() {
+            let err_msg = format!(
+                "Failed to connect to Redis after {} attempts: {}",
+                config.redis_options.retry_count + 1,
+                last_error.map_or_else(|| "Unknown error".to_string(), |e| e.to_string())
+            );
+            error!("{}", err_msg);
+            return Err(err_msg);
+        }
+
+        // 接続テスト
+        let mut conn = conn.unwrap();
+
+        // コマンド実行タイムアウトの設定（メッセージパッシングで実装）
+        let ping_timeout = config.redis_options.command_timeout;
+        let ping_result = tokio::time::timeout(
+            Duration::from_millis(ping_timeout),
+            redis::cmd("PING").query_async::<_, String>(&mut conn),
+        )
+        .await;
+
+        // タイムアウトとエラーを処理
+        match ping_result {
+            Ok(redis_result) => match redis_result {
+                Ok(response) => {
+                    if response != "PONG" {
+                        error!("Unexpected response from Redis server: {}", response);
+                        return Err(format!(
+                            "Unexpected response from Redis server: {}",
+                            response
+                        ));
+                    }
+                    info!("Successfully connected to Redis");
+                }
+                Err(err) => {
+                    error!("Failed to ping Redis server: {}", err);
+                    return Err(format!("Failed to ping Redis server: {}", err));
+                }
+            },
+            Err(_) => {
+                error!("Redis PING command timed out after {}ms", ping_timeout);
+                return Err(format!(
+                    "Redis PING command timed out after {}ms",
+                    ping_timeout
+                ));
             }
         }
 
@@ -177,23 +361,40 @@ impl RedisRateLimiter {
 
         let max_requests = self.config.requests_per_second + self.config.burst;
 
-        let result: Result<i32, RedisError> = redis::Script::new(script)
-            .key(redis_key)
-            .arg(max_requests)
-            .arg(window_size)
-            .invoke_async(&mut conn)
-            .await;
+        // コマンドタイムアウトの設定
+        let command_timeout = self.config.redis_options.command_timeout;
+        let script_result = tokio::time::timeout(
+            Duration::from_millis(command_timeout),
+            redis::Script::new(script)
+                .key(redis_key)
+                .arg(max_requests)
+                .arg(window_size)
+                .invoke_async(&mut conn),
+        )
+        .await;
 
-        match result {
-            Ok(val) => {
-                debug!("Fixed window rate limit check for {}: {}", key, val);
-                Ok(val == 1)
-            }
-            Err(err) => {
-                error!("Failed to execute fixed window rate limit script: {}", err);
+        match script_result {
+            Ok(redis_result) => match redis_result {
+                Ok(val) => {
+                    debug!("Fixed window rate limit check for {}: {}", key, val);
+                    Ok(val == 1)
+                }
+                Err(err) => {
+                    error!("Failed to execute fixed window rate limit script: {}", err);
+                    Err(format!(
+                        "Failed to execute fixed window rate limit script: {}",
+                        err
+                    ))
+                }
+            },
+            Err(_) => {
+                error!(
+                    "Fixed window rate limit check timed out after {}ms",
+                    command_timeout
+                );
                 Err(format!(
-                    "Failed to execute fixed window rate limit script: {}",
-                    err
+                    "Fixed window rate limit check timed out after {}ms",
+                    command_timeout
                 ))
             }
         }
@@ -260,29 +461,46 @@ impl RedisRateLimiter {
             end
         "#;
 
-        let result: Result<i32, RedisError> = redis::Script::new(script)
-            .key(current_key)
-            .key(previous_key)
-            .arg(now)
-            .arg(window_size)
-            .arg(self.config.requests_per_second)
-            .arg(self.config.burst)
-            .invoke_async(&mut conn)
-            .await;
+        // コマンドタイムアウトの設定
+        let command_timeout = self.config.redis_options.command_timeout;
+        let script_result = tokio::time::timeout(
+            Duration::from_millis(command_timeout),
+            redis::Script::new(script)
+                .key(current_key)
+                .key(previous_key)
+                .arg(now)
+                .arg(window_size)
+                .arg(self.config.requests_per_second)
+                .arg(self.config.burst)
+                .invoke_async(&mut conn),
+        )
+        .await;
 
-        match result {
-            Ok(val) => {
-                debug!("Sliding window rate limit check for {}: {}", key, val);
-                Ok(val == 1)
-            }
-            Err(err) => {
+        match script_result {
+            Ok(redis_result) => match redis_result {
+                Ok(val) => {
+                    debug!("Sliding window rate limit check for {}: {}", key, val);
+                    Ok(val == 1)
+                }
+                Err(err) => {
+                    error!(
+                        "Failed to execute sliding window rate limit script: {}",
+                        err
+                    );
+                    Err(format!(
+                        "Failed to execute sliding window rate limit script: {}",
+                        err
+                    ))
+                }
+            },
+            Err(_) => {
                 error!(
-                    "Failed to execute sliding window rate limit script: {}",
-                    err
+                    "Sliding window rate limit check timed out after {}ms",
+                    command_timeout
                 );
                 Err(format!(
-                    "Failed to execute sliding window rate limit script: {}",
-                    err
+                    "Sliding window rate limit check timed out after {}ms",
+                    command_timeout
                 ))
             }
         }
@@ -347,25 +565,42 @@ impl RedisRateLimiter {
             end
         "#;
 
-        let result: Result<i32, RedisError> = redis::Script::new(script)
-            .key(redis_key)
-            .arg(now)
-            .arg(refill_time)
-            .arg(self.config.burst)
-            .arg(self.config.window_size)
-            .invoke_async(&mut conn)
-            .await;
+        // コマンドタイムアウトの設定
+        let command_timeout = self.config.redis_options.command_timeout;
+        let script_result = tokio::time::timeout(
+            Duration::from_millis(command_timeout),
+            redis::Script::new(script)
+                .key(redis_key)
+                .arg(now)
+                .arg(refill_time)
+                .arg(self.config.burst)
+                .arg(self.config.window_size)
+                .invoke_async(&mut conn),
+        )
+        .await;
 
-        match result {
-            Ok(val) => {
-                debug!("Token bucket rate limit check for {}: {}", key, val);
-                Ok(val == 1)
-            }
-            Err(err) => {
-                error!("Failed to execute token bucket rate limit script: {}", err);
+        match script_result {
+            Ok(redis_result) => match redis_result {
+                Ok(val) => {
+                    debug!("Token bucket rate limit check for {}: {}", key, val);
+                    Ok(val == 1)
+                }
+                Err(err) => {
+                    error!("Failed to execute token bucket rate limit script: {}", err);
+                    Err(format!(
+                        "Failed to execute token bucket rate limit script: {}",
+                        err
+                    ))
+                }
+            },
+            Err(_) => {
+                error!(
+                    "Token bucket rate limit check timed out after {}ms",
+                    command_timeout
+                );
                 Err(format!(
-                    "Failed to execute token bucket rate limit script: {}",
-                    err
+                    "Token bucket rate limit check timed out after {}ms",
+                    command_timeout
                 ))
             }
         }
@@ -435,25 +670,42 @@ impl RedisRateLimiter {
             end
         "#;
 
-        let result: Result<i32, RedisError> = redis::Script::new(script)
-            .key(redis_key)
-            .arg(now)
-            .arg(rate)
-            .arg(bucket_size)
-            .arg(self.config.window_size)
-            .invoke_async(&mut conn)
-            .await;
+        // コマンドタイムアウトの設定
+        let command_timeout = self.config.redis_options.command_timeout;
+        let script_result = tokio::time::timeout(
+            Duration::from_millis(command_timeout),
+            redis::Script::new(script)
+                .key(redis_key)
+                .arg(now)
+                .arg(rate)
+                .arg(bucket_size)
+                .arg(self.config.window_size)
+                .invoke_async(&mut conn),
+        )
+        .await;
 
-        match result {
-            Ok(val) => {
-                debug!("Leaky bucket rate limit check for {}: {}", key, val);
-                Ok(val == 1)
-            }
-            Err(err) => {
-                error!("Failed to execute leaky bucket rate limit script: {}", err);
+        match script_result {
+            Ok(redis_result) => match redis_result {
+                Ok(val) => {
+                    debug!("Leaky bucket rate limit check for {}: {}", key, val);
+                    Ok(val == 1)
+                }
+                Err(err) => {
+                    error!("Failed to execute leaky bucket rate limit script: {}", err);
+                    Err(format!(
+                        "Failed to execute leaky bucket rate limit script: {}",
+                        err
+                    ))
+                }
+            },
+            Err(_) => {
+                error!(
+                    "Leaky bucket rate limit check timed out after {}ms",
+                    command_timeout
+                );
                 Err(format!(
-                    "Failed to execute leaky bucket rate limit script: {}",
-                    err
+                    "Leaky bucket rate limit check timed out after {}ms",
+                    command_timeout
                 ))
             }
         }
