@@ -1,7 +1,7 @@
 use lazy_static::lazy_static;
 use log::{debug, error, info};
-use nginx::core::*;
-use nginx::http::*;
+use ngx::core::*;
+use ngx::http::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
