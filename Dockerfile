@@ -35,7 +35,7 @@ ENV NGX_VERSION=${NGX_VERSION}
 RUN cargo build --release
 
 # 実行環境
-FROM nginx:1.27-alpine
+FROM nginx:1.29-alpine
 
 # Redisをインストール
 RUN apk add --no-cache redis
